@@ -1,5 +1,4 @@
-dbt-postgres == 0.20.0
-fastapi ==0.68.1
+fastapi == 0.68.1
 uvicorn == 0.15.0
 ipdb == 0.13.9
 websockets== 9.1
