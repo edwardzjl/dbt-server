@@ -20,7 +20,9 @@ class CachedManifest:
     config: Optional[Any] = None
     parser: Optional[Any] = None
 
-    def set_last_parsed_manifest(self, state_id, manifest, project_path, manifest_size, overwrite=True):
+    def set_last_parsed_manifest(
+        self, state_id, manifest, project_path, manifest_size, overwrite=True
+    ):
         with MANIFEST_LOCK:
             if self.state_id is None or overwrite:
                 self.state_id = state_id
@@ -110,7 +112,9 @@ class StateController(object):
 
         # Every parse updates the in-memory manifest cache
         logger.info(f"Updating cache (state_id={state_id})")
-        LAST_PARSED.set_last_parsed_manifest(state_id, manifest, source_path, 0, overwrite=True)
+        LAST_PARSED.set_last_parsed_manifest(
+            state_id, manifest, source_path, 0, overwrite=True
+        )
 
         logger.info(f"Done parsing from source (state_id={state_id})")
         return cls.from_cached(LAST_PARSED)
@@ -146,12 +150,17 @@ class StateController(object):
         manifest = dbt_service.deserialize_manifest(manifest_path)
         manifest_size = filesystem_service.get_size(manifest_path)
 
-        logger.info(f"Attempting to update cache (state_id={state_id})")
         source_path = filesystem_service.get_root_path(state_id)
-        cache_add = LAST_PARSED.set_last_parsed_manifest(state_id, manifest, source_path, manifest_size, overwrite=False)
+        cache_add = LAST_PARSED.set_last_parsed_manifest(
+            state_id, manifest, source_path, manifest_size, overwrite=False
+        )
         if cache_add:
+            logger.info(f"Updated cache (state_id={state_id})")
             return cls.from_cached(LAST_PARSED)
         else:
+            logger.info(
+                f"Not updating cache (state_id={state_id}, existing={LAST_PARSED.state_id})"
+            )
             return cls.from_parts(state_id, manifest, source_path, manifest_size)
 
     @tracer.wrap

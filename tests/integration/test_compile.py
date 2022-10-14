@@ -122,6 +122,40 @@ class CompilationInterfaceTests(unittest.TestCase):
 
             lookup.assert_called_once_with("abc123")
 
+    def test_cache_overwrite(self):
+        cached = CachedManifest()
+        assert cached.state_id is None
+        assert cached.manifest is None
+        assert cached.manifest_size is None
+
+        path = "working-dir/state-abc123/"
+
+        manifest_mock = Mock()
+
+        # Update cache (ie. on /parse)
+        with patch.multiple(
+            "dbt_server.services.dbt_service",
+            create_dbt_config=Mock(),
+            get_sql_parser=Mock(),
+        ):
+            # No state set, this should overwrite
+            cached.set_last_parsed_manifest(
+                "abc123", manifest_mock, path, 512, overwrite=False
+            )
+            assert cached.state_id == "abc123"
+
+            # State is set, this should not overwrite
+            cached.set_last_parsed_manifest(
+                "def456", manifest_mock, path, 512, overwrite=False
+            )
+            assert cached.state_id == "abc123"
+
+            # Explicitly overwrite
+            cached.set_last_parsed_manifest(
+                "def456", manifest_mock, path, 512, overwrite=True
+            )
+            assert cached.state_id == "def456"
+
     def test_compilation_interface_cache_mutation(self):
         cached = CachedManifest()
         assert cached.state_id is None
@@ -136,9 +170,9 @@ class CompilationInterfaceTests(unittest.TestCase):
         cache_miss = cached.lookup(None)
         assert cache_miss is None
 
-        # Update cache (ie. on /parse)
         manifest_mock = Mock()
 
+        # Update cache (ie. on /parse)
         with patch.multiple(
             "dbt_server.services.dbt_service",
             create_dbt_config=Mock(),

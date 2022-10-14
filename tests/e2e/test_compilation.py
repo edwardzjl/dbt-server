@@ -2,6 +2,8 @@ from fastapi.testclient import TestClient
 from unittest import TestCase
 
 from dbt_server.server import app
+from dbt_server import state
+
 from .helpers import profiles_dir
 from .fixtures import simple, simple2, invalid, Profiles
 
@@ -172,6 +174,77 @@ class ValidManifestBuildingTestCase(ManifestBuildingTestCase):
             self.assertEqual(resp.status_code, 200)
             data = resp.json()
             assert "compiled_code" in data
+
+
+class CacheOnCompileTestCase(ManifestBuildingTestCase):
+    def test_cache_on_compile(self):
+        """
+        /compile queries should update the cache _only if the cache is not populated_.
+        """
+        with profiles_dir(Profiles.Postgres):
+            # -------- Populate two states w/ parsed manifests -----
+
+            # Push project code (first project)
+            resp_push = self.push_fixture_data(simple.FILES)
+            self.assertEqual(resp_push.status_code, 200)
+            data = resp_push.json()
+            state_id_1 = data["state"]
+
+            # parse project code
+            resp_parse = self.parse_fixture_data(state_id_1)
+            self.assertEqual(resp_parse.status_code, 200)
+
+            # Push project code (second project)
+            resp_push = self.push_fixture_data(simple2.FILES)
+            self.assertEqual(resp_push.status_code, 200)
+            data = resp_push.json()
+            state_id_2 = data["state"]
+
+            # parse project code
+            resp_parse = self.parse_fixture_data(state_id_2)
+            self.assertEqual(resp_parse.status_code, 200)
+
+            assert state_id_1 != state_id_2
+
+            # -------- Done pushing & parsing, time to compile -----
+
+            # /parse invokes caching (which is good) but we want to simulate a second
+            # worker process which does _not_ receive the /parse request. The first
+            # /compile on that worker should 1) be a cache miss, but 2) populate the cache
+            state.LAST_PARSED.reset()
+            assert state.LAST_PARSED.state_id is None
+
+            # Compile a query with state 1
+            valid_query = "select * from {{ ref('model_1') }}"
+            resp = self.compile_against_state(state_id_1, valid_query)
+            data = resp.json()
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(
+                data["compiled_code"], 'select * from "analytics"."analytics"."model_1"'
+            )
+
+            # make sure this state is cached
+            assert state.LAST_PARSED.state_id == state_id_1
+            assert state.LAST_PARSED.manifest is not None
+            assert state.LAST_PARSED.manifest_size is not None
+            assert state.LAST_PARSED.config is not None
+            assert state.LAST_PARSED.parser is not None
+
+            # Compile a query with state 2
+            valid_query = "select * from {{ ref('model_1') }}"
+            resp = self.compile_against_state(state_id_2, valid_query)
+            data = resp.json()
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(
+                data["compiled_code"], 'select * from "analytics"."analytics"."model_1"'
+            )
+
+            # Make sure this compile did not overwrite the cache
+            assert state.LAST_PARSED.state_id == state_id_1
+            assert state.LAST_PARSED.manifest is not None
+            assert state.LAST_PARSED.manifest_size is not None
+            assert state.LAST_PARSED.config is not None
+            assert state.LAST_PARSED.parser is not None
 
 
 class CodeChangeTestCase(ManifestBuildingTestCase):
