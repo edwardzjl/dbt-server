@@ -19,13 +19,16 @@ class CachedManifest:
     config: Optional[Any] = None
     parser: Optional[Any] = None
 
-    def set_last_parsed_manifest(self, state_id, manifest, project_path):
+    def set_last_parsed_manifest(self, state_id, manifest, project_path, overwrite=True):
         with MANIFEST_LOCK:
-            self.state_id = state_id
-            self.manifest = manifest
+            if self.state_id is None or overwrite:
+                self.state_id = state_id
+                self.manifest = manifest
 
-            self.config = dbt_service.create_dbt_config(project_path)
-            self.parser = dbt_service.get_sql_parser(self.config, self.manifest)
+                self.config = dbt_service.create_dbt_config(project_path)
+                self.parser = dbt_service.get_sql_parser(self.config, self.manifest)
+                return True
+            return False
 
     def lookup(self, state_id):
         with MANIFEST_LOCK:
@@ -89,7 +92,7 @@ class StateController(object):
         manifest = dbt_service.parse_to_manifest(source_path, parse_args)
         # Every parse updates the in-memory manifest cache
         logger.info(f"Updating cache (state_id={state_id})")
-        LAST_PARSED.set_last_parsed_manifest(state_id, manifest, source_path)
+        LAST_PARSED.set_last_parsed_manifest(state_id, manifest, source_path, overwrite=True)
 
         logger.info(f"Done parsing from source (state_id={state_id})")
         return cls.from_cached(LAST_PARSED)
@@ -125,7 +128,13 @@ class StateController(object):
         manifest = dbt_service.deserialize_manifest(manifest_path)
 
         source_path = filesystem_service.get_root_path(state_id)
-        return cls.from_parts(state_id, manifest, source_path)
+        logger.info(f"Attempting to update cache (state_id={state_id})")
+
+        cache_add = LAST_PARSED.set_last_parsed_manifest(state_id, manifest, source_path, overwrite=False)
+        if cache_add:
+            return cls.from_cached(LAST_PARSED)
+        else:
+            return cls.from_parts(state_id, manifest, source_path)
 
     @tracer.wrap
     def serialize_manifest(self):
