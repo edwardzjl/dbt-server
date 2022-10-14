@@ -15,20 +15,23 @@ MANIFEST_LOCK = threading.Lock()
 class CachedManifest:
     state_id: Optional[str] = None
     manifest: Optional[Any] = None
+    manifest_size: Optional[int] = None
 
     config: Optional[Any] = None
     parser: Optional[Any] = None
 
-    def set_last_parsed_manifest(self, state_id, manifest, project_path, overwrite=True):
+    def set_last_parsed_manifest(self, state_id, manifest, project_path, manifest_size, overwrite=True):
         with MANIFEST_LOCK:
             if self.state_id is None or overwrite:
                 self.state_id = state_id
                 self.manifest = manifest
+                self.manifest_size = manifest_size
 
                 self.config = dbt_service.create_dbt_config(project_path)
                 self.parser = dbt_service.get_sql_parser(self.config, self.manifest)
                 return True
-            return False
+            else:
+                return False
 
     def lookup(self, state_id):
         with MANIFEST_LOCK:
@@ -44,6 +47,7 @@ class CachedManifest:
         with MANIFEST_LOCK:
             self.state_id = None
             self.manifest = None
+            self.manifest_size = None
             self.config = None
             self.parser = None
 
@@ -52,22 +56,33 @@ LAST_PARSED = CachedManifest()
 
 
 class StateController(object):
-    def __init__(self, state_id, manifest, config, parser):
+    def __init__(
+        self, state_id, manifest, config, parser, manifest_size, is_manifest_cached
+    ):
         self.state_id = state_id
         self.manifest = manifest
         self.config = config
         self.parser = parser
+        self.manifest_size = manifest_size
+        self.is_manifest_cached = is_manifest_cached
 
         self.root_path = filesystem_service.get_root_path(state_id)
         self.serialize_path = filesystem_service.get_path(state_id, "manifest.msgpack")
 
     @classmethod
     @tracer.wrap
-    def from_parts(cls, state_id, manifest, source_path):
+    def from_parts(cls, state_id, manifest, source_path, manifest_size):
         config = dbt_service.create_dbt_config(source_path)
         parser = dbt_service.get_sql_parser(config, manifest)
 
-        return cls(state_id=state_id, manifest=manifest, config=config, parser=parser)
+        return cls(
+            state_id=state_id,
+            manifest=manifest,
+            config=config,
+            parser=parser,
+            manifest_size=manifest_size,
+            is_manifest_cached=False,
+        )
 
     @classmethod
     @tracer.wrap
@@ -77,6 +92,8 @@ class StateController(object):
             manifest=cached.manifest,
             config=cached.config,
             parser=cached.parser,
+            manifest_size=cached.manifest_size,
+            is_manifest_cached=True,
         )
 
     @classmethod
@@ -90,9 +107,10 @@ class StateController(object):
         source_path = filesystem_service.get_root_path(state_id)
         logger.info(f"Parsing manifest from filetree (state_id={state_id})")
         manifest = dbt_service.parse_to_manifest(source_path, parse_args)
+
         # Every parse updates the in-memory manifest cache
         logger.info(f"Updating cache (state_id={state_id})")
-        LAST_PARSED.set_last_parsed_manifest(state_id, manifest, source_path, overwrite=True)
+        LAST_PARSED.set_last_parsed_manifest(state_id, manifest, source_path, 0, overwrite=True)
 
         logger.info(f"Done parsing from source (state_id={state_id})")
         return cls.from_cached(LAST_PARSED)
@@ -126,20 +144,21 @@ class StateController(object):
         manifest_path = filesystem_service.get_path(state_id, "manifest.msgpack")
         logger.info(f"Loading manifest from file system ({manifest_path})")
         manifest = dbt_service.deserialize_manifest(manifest_path)
+        manifest_size = filesystem_service.get_size(manifest_path)
 
-        source_path = filesystem_service.get_root_path(state_id)
         logger.info(f"Attempting to update cache (state_id={state_id})")
-
-        cache_add = LAST_PARSED.set_last_parsed_manifest(state_id, manifest, source_path, overwrite=False)
+        source_path = filesystem_service.get_root_path(state_id)
+        cache_add = LAST_PARSED.set_last_parsed_manifest(state_id, manifest, source_path, manifest_size, overwrite=False)
         if cache_add:
             return cls.from_cached(LAST_PARSED)
         else:
-            return cls.from_parts(state_id, manifest, source_path)
+            return cls.from_parts(state_id, manifest, source_path, manifest_size)
 
     @tracer.wrap
     def serialize_manifest(self):
         logger.info(f"Serializing manifest to file system ({self.serialize_path})")
         dbt_service.serialize_manifest(self.manifest, self.serialize_path)
+        self.manifest_size = filesystem_service.get_size(self.serialize_path)
 
     @tracer.wrap
     def update_state_id(self):
@@ -158,3 +177,10 @@ class StateController(object):
     @tracer.wrap
     def execute_query(self, query):
         return dbt_service.execute_sql(self.manifest, self.root_path, query)
+
+    @tracer.wrap
+    def update_cache(self):
+        logger.info(f"Updating cache (state_id={self.state_id})")
+        LAST_PARSED.set_last_parsed_manifest(
+            self.state_id, self.manifest, self.root_path, self.manifest_size
+        )
